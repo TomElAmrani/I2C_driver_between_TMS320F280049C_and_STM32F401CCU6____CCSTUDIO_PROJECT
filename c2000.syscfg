@@ -1,0 +1,28 @@
+/**
+ * These arguments were used when this file was generated. They will be automatically applied on subsequent loads
+ * via the GUI or CLI. Run CLI with '--help' for additional information on how to override these arguments.
+ * @cliArgs --device "F28004x" --package "F28004x_100PZ" --part "F28004x_100PZ" --context "system" --product "C2000WARE@5.02.00.00"
+ * @versions {"tool":"1.20.0+3587"}
+ */
+
+/**
+ * Import the modules used in this configuration.
+ */
+const i2c  = scripting.addModule("/driverlib/i2c.js", {}, false);
+const i2c1 = i2c.addInstance();
+
+/**
+ * Write custom configuration values to the imported modules.
+ */
+i2c1.$name                  = "myI2C0";
+i2c1.bitRate                = 100000;
+i2c1.bitCount               = "I2C_BITCOUNT_8";
+i2c1.dataCount              = 2;
+i2c1.targetAddress          = 0x10;
+i2c1.ownAddress             = 0x3;
+i2c1.emulationMode          = "I2C_EMULATION_FREE_RUN";
+i2c1.i2c.$assign            = "I2CA";
+i2c1.i2c.i2c_sdaPin.$assign = "GPIO10";
+i2c1.i2c.i2c_sclPin.$assign = "GPIO8";
+i2c1.sdaQual.qualMode       = "GPIO_QUAL_SYNC";
+i2c1.sclQual.qualMode       = "GPIO_QUAL_SYNC";

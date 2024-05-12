@@ -1,0 +1,8 @@
+"./syscfg/board.obj"
+"./syscfg/c2000ware_libraries.obj"
+"./i2c_ex2_eeprom.obj"
+"./device/device.obj"
+"./device/f28004x_codestartbranch.obj"
+"../28004x_generic_flash_lnk.cmd"
+"C:/ti/C2000Ware_5_02_00_00/driverlib/f28004x/driverlib/ccs/Debug/driverlib.lib"
+-llibc.a
