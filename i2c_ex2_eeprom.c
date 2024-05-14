@@ -2,67 +2,16 @@
 //
 // FILE:   i2c_ex2_eeprom.c
 //
-// TITLE:  I2C EEPROM
+// TITLE:  I2C DIGI POTENIOEMETER
 //
-//! \addtogroup driver_example_list
-//! <h1>I2C EEPROM</h1>
-//!
-//! This program will write 1-14 words to EEPROM and read them back. The data
-//! written and the EEPROM address written to are contained in the message
-//! structure, i2cMsgOut. The data read back will be contained in the message
-//! structure i2cMsgIn.
 //!
 //! \b External \b Connections on Control card\n
-//!  - Connect external I2C EEPROM at address 0x50
-//!  - Connect GPIO32/SDAA on controlCARD to external EEPROM SDA (serial data) pin
-//!  - Connect GPIO33/SCLA on controlCARD to external EEPROM SCL (serial clock) pin
-//!
-//! \b External \b Connections on Launchpad\n
-//!  - Connect external I2C EEPROM at address 0x50
-//!  - Connect GPIO35/SDAA on Launchpad to external EEPROM SDA (serial data) pin
-//!  - Connect GPIO37/SCLA on Launchpad to external EEPROM SCL (serial clock) pin
-
-//! \b Watch \b Variables \n
-//!  - \b i2cMsgOut - Message containing data to write to EEPROM
-//!  - \b i2cMsgIn - Message containing data read from EEPROM
+//!  - Connect I2C interface to buses
+//!  - Connect GPIO10/SDAA on ControlCard to SDA (serial data) line
+//!  - Connect GPIO8/SCLA on ControlCard to  SCL (serial clock) line
 //!
 //
 //#############################################################################
-//
-//
-// $Copyright:
-// Copyright (C) 2024 Texas Instruments Incorporated - http://www.ti.com/
-//
-// Redistribution and use in source and binary forms, with or without 
-// modification, are permitted provided that the following conditions 
-// are met:
-// 
-//   Redistributions of source code must retain the above copyright 
-//   notice, this list of conditions and the following disclaimer.
-// 
-//   Redistributions in binary form must reproduce the above copyright
-//   notice, this list of conditions and the following disclaimer in the 
-//   documentation and/or other materials provided with the   
-//   distribution.
-// 
-//   Neither the name of Texas Instruments Incorporated nor the names of
-//   its contributors may be used to endorse or promote products derived
-//   from this software without specific prior written permission.
-// 
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS 
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT 
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT 
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT 
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-// $
-//#############################################################################
-
 //
 // Included Files
 //
@@ -71,15 +20,67 @@
 #include "board.h"
 
 //
-// Defines
+// Defines digital Potentiometers Address of MCP45HV51
 //
-#define TARGET_ADDRESS              0x20
-#define EEPROM_HIGH_ADDR            0x44
-#define EEPROM_LOW_ADDR             0x55
-#define NUM_BYTES                   0
-#define MAX_BUFFER_SIZE             14      // Max is currently 14 because of
-                                            // 2 address bytes and the 16-byte 
-                                            // FIFO
+
+//
+// THE FIRST BYTE IN I2C FRAME NAMED CONTROL Byte is : device ADDRESS | 1bit for read/write (write=0)
+//
+
+#define DP1_ADDRESS     0x3C
+#define DP2_ADDRESS     0x3D
+#define DP3_ADDRESS     0x3E
+#define DP4_ADDRESS     0x3F
+
+
+//
+// THE SECOND BYTE IN I2C FRAME NAMED Command Byte is : Memory ADDRESS | Command | 2bits reserved
+//
+
+//
+// MEMORY MAP of the digital potentiometer MCP45HV51
+//
+typedef enum MemoryAddress{
+    WIPER_0_ADDRESS=0x00, //Allowed Commands: Read, Write,Increment, Decrement
+    TCON_REG_ADDRESS=0x04 //Allowed Commands: Read, Write
+} MemoryAddress;
+
+//
+// Commands
+//
+typedef enum Command{
+    WRITE_DATA=0,
+    INCREMENT=1,
+    DECREMENT=2,
+    READ_DATA=3
+} Command;
+
+// when increment or decrement a wiper , we need only two bytes (Control Byte and Command byte)
+// when we write data we need another byte , which is the data byte
+// for TCON register, we need only W and B terminals , we will disconnect A to avoid any current flow
+// TCON four writable bits = 0b1011 -> See datasheet section (4.4.1.2 Terminal Control (TCON) Registers)
+
+#define TCON_DATA_CONFIG 0x0B  //sent in initialisation to configure the potentiometer
+
+//the data range for the wiper register is 0x00-0xFF
+//0x00 -> gives typically 0 ohm
+//0xFF gives typically 5k ohm
+
+
+#define MAX_FAIL_COUNT 1000 // if the message is not acknowledged 1000 times,
+                            // the MCU will stop communicate with it until a reset happens
+
+struct I2C_Msg {
+    uint16_t msgStatus;                 // Word stating what state msg is in.
+                                        // See MSG_STATUS_* defines above.
+    uint8_t targetAddr;                 // Target address tied to the message.
+    MemoryAddress memoryAddr;           // memory address of register
+    Command command;                    // read , write , decrement , increment
+    uint16_t data_out;                  // holding message data to send
+    uint16_t data_in;                   // holding message data received
+    uint16_t failCount;                 // failing of the message
+};
+
 
 //
 // I2C message states for I2CMsg struct
@@ -92,6 +93,7 @@
 #define MSG_STATUS_RESTART          0x0022 // Ready to become controller-receiver
 #define MSG_STATUS_READ_BUSY        0x0023 // Wait for stop before reading data
 
+
 //
 // Error messages for read and write functions
 //
@@ -99,57 +101,58 @@
 #define ERROR_STOP_NOT_READY        0x5555
 #define SUCCESS                     0x0000
 
-//
-// Typedefs
-//
-struct I2CMsg {
-    uint16_t msgStatus;                  // Word stating what state msg is in.
-                                         // See MSG_STATUS_* defines above.
-    uint16_t targetAddr;                  // Target address tied to the message.
-    uint16_t numBytes;                   // Number of valid bytes in message.
-    uint16_t memoryHighAddr;             // EEPROM address of data associated
-                                         // with message (high byte).
-    uint16_t memoryLowAddr;              // EEPROM address of data associated
-                                         // with message (low byte).
-    uint16_t msgBuffer[MAX_BUFFER_SIZE]; // Array holding message data.
-};
 
 //
-// Globals
+// gloabal variables
 //
-struct I2CMsg i2cMsgOut = {MSG_STATUS_SEND_WITHSTOP,
-                           TARGET_ADDRESS,
-                           NUM_BYTES,
-                           EEPROM_HIGH_ADDR,
-                           EEPROM_LOW_ADDR,
-                           0x01,                // Message bytes
-                           0x23,
-                           0x45,
-                           0x67,
-                           0x89,
-                           0xAB,
-                           0xCD,
-                           0xEF};
-struct I2CMsg i2cMsgIn  = {MSG_STATUS_SEND_NOSTOP,
-                           TARGET_ADDRESS,
-                           NUM_BYTES,
-                           EEPROM_HIGH_ADDR,
-                           EEPROM_LOW_ADDR};
 
-struct I2CMsg *currentMsgPtr;                   // Used in interrupt
+struct I2C_Msg msg_DP1={MSG_STATUS_SEND_WITHSTOP,
+                    DP1_ADDRESS,
+                    WIPER_0_ADDRESS,
+                    WRITE_DATA,
+                    0x57,
+                    0x57,
+                    0};
+struct I2C_Msg msg_DP2={MSG_STATUS_SEND_NOSTOP,
+                    DP1_ADDRESS,
+                    WIPER_0_ADDRESS,
+                    READ_DATA,
+                    0x57,
+                    0x57,
+                    0};
+struct I2C_Msg msg_DP3={MSG_STATUS_SEND_WITHSTOP,
+                    DP3_ADDRESS,
+                    WIPER_0_ADDRESS,
+                    WRITE_DATA,
+                    0x57,
+                    0x57,
+                    0};
+struct I2C_Msg msg_DP4={MSG_STATUS_SEND_WITHSTOP,
+                    DP4_ADDRESS,
+                    WIPER_0_ADDRESS,
+                    WRITE_DATA,
+                    0x57,
+                    0x57,
+                    0};
 
-uint16_t passCount = 0;
-uint16_t failCount = 0;
+
+
+uint8_t malFunctioningTargets[4];
+volatile uint8_t j=0;
+
+
+struct I2C_Msg *currentMsgPtr;                   // Used in interrupt
+
+
 
 //
 // Function Prototypes
 //
 void initI2C(void);
-uint16_t readData(struct I2CMsg *msg);
-uint16_t writeData(struct I2CMsg *msg);
+uint16_t readData(struct I2C_Msg *msg);
+uint16_t writeData(struct I2C_Msg *msg);
 
-void fail(void);
-void pass(void);
+void fail(uint8_t targetAddress);
 
 __interrupt void i2cAISR(void);
 
@@ -159,7 +162,8 @@ __interrupt void i2cAISR(void);
 void main(void)
 {
     uint16_t error;
-    uint16_t i;
+
+
 
     //
     // Initialize device clock and peripherals
@@ -207,7 +211,7 @@ void main(void)
     //
     // Set message pointer used in interrupt to point to outgoing message
     //
-    currentMsgPtr = &i2cMsgOut;
+    currentMsgPtr = &msg_DP1;
 
     //
     // Enable interrupts required for this example
@@ -225,9 +229,10 @@ void main(void)
     //
     while(1)
     {
-       error = writeData(&i2cMsgOut);
-
-       DEVICE_DELAY_US(100000);
+       DEVICE_DELAY_US(1000);
+       currentMsgPtr = &msg_DP1;
+       currentMsgPtr->msgStatus= MSG_STATUS_SEND_WITHSTOP;
+       error = writeData(&msg_DP1);
 
     }
 }
@@ -247,7 +252,6 @@ void initI2C()
     //
     I2C_initController(I2CA_BASE, DEVICE_SYSCLK_FREQ, 100000, I2C_DUTYCYCLE_33);
     I2C_setBitCount(I2CA_BASE, I2C_BITCOUNT_8);
-    I2C_setTargetAddress(I2CA_BASE, TARGET_ADDRESS);
     I2C_setEmulationMode(I2CA_BASE, I2C_EMULATION_FREE_RUN);
 
     //
@@ -269,11 +273,12 @@ void initI2C()
 }
 
 //
-// Function to send the data that is to be written to the EEPROM
+// Function to send the data that is to be written to the DIGITAL POTENTIOMETER
 //
-uint16_t writeData(struct I2CMsg *msg)
+uint16_t writeData(struct I2C_Msg *msg)
 {
-    uint16_t i;
+
+    I2C_setTargetAddress(I2CA_BASE, msg->targetAddr);
 
     //
     // Wait until the STP bit is cleared from any previous controller
@@ -289,7 +294,7 @@ uint16_t writeData(struct I2CMsg *msg)
     //
     // Setup target address
     //
-    I2C_setTargetAddress(I2CA_BASE, TARGET_ADDRESS);
+    I2C_setTargetAddress(I2CA_BASE, msg->targetAddr);
 
     //
     // Check if bus busy
@@ -302,18 +307,22 @@ uint16_t writeData(struct I2CMsg *msg)
     //
     // Setup number of bytes to send msgBuffer and address
     //
-    I2C_setDataCount(I2CA_BASE, (msg->numBytes + 2));
+    if(msg->command == WRITE_DATA){
+        I2C_setDataCount(I2CA_BASE, 2);
+    }else{
+        I2C_setDataCount(I2CA_BASE, 1);
+    }
 
     //
     // Setup data to send
     //
-    I2C_putData(I2CA_BASE, msg->memoryHighAddr);
-    I2C_putData(I2CA_BASE, msg->memoryLowAddr);
+    I2C_putData(I2CA_BASE, (((msg->memoryAddr)<<2)+msg->command)<<2 ); // Command byte
 
-    for (i = 0; i < msg->numBytes; i++)
-    {
-        I2C_putData(I2CA_BASE, msg->msgBuffer[i]);
+    if(msg->command == WRITE_DATA){
+    I2C_putData(I2CA_BASE, msg->data_out); // send data byte
     }
+
+    currentMsgPtr->msgStatus = MSG_STATUS_WRITE_BUSY;
 
     //
     // Send start as controller transmitter
@@ -325,10 +334,12 @@ uint16_t writeData(struct I2CMsg *msg)
     return(SUCCESS);
 }
 
+///////////////////////deal with No-acknowlegement
+
 //
-// Function to prepare for the data that is to be read from the EEPROM
+// Function to prepare for the data that is to be read from the digital potentiometer
 //
-uint16_t readData(struct I2CMsg *msg)
+uint16_t readData(struct I2C_Msg *msg)
 {
     //
     // Wait until the STP bit is cleared from any previous controller
@@ -344,7 +355,7 @@ uint16_t readData(struct I2CMsg *msg)
     //
     // Setup target address
     //
-    I2C_setTargetAddress(I2CA_BASE, TARGET_ADDRESS);
+    I2C_setTargetAddress(I2CA_BASE, msg->targetAddr);
 
     //
     // If we are in the the address setup phase, send the address without a
@@ -361,12 +372,12 @@ uint16_t readData(struct I2CMsg *msg)
         }
 
         //
-        // Send data to setup EEPROM address
+        // Send data to setup the potentiometer address and operation
         //
-        I2C_setDataCount(I2CA_BASE, 2);
-        I2C_putData(I2CA_BASE, msg->memoryHighAddr);
-        I2C_putData(I2CA_BASE, msg->memoryLowAddr);
+        I2C_setDataCount(I2CA_BASE, 1);
+        I2C_putData(I2CA_BASE, (((msg->memoryAddr)<<2)+msg->command)<<2 );
         I2C_setConfig(I2CA_BASE, I2C_CONTROLLER_SEND_MODE);
+        msg->msgStatus = MSG_STATUS_SEND_NOSTOP_BUSY;
         I2C_sendStartCondition(I2CA_BASE);
     }
     else if(msg->msgStatus == MSG_STATUS_RESTART)
@@ -375,14 +386,20 @@ uint16_t readData(struct I2CMsg *msg)
         // Address setup phase has completed. Now setup how many bytes expected
         // and send restart as controller-receiver.
         //
-        I2C_setDataCount(I2CA_BASE, (msg->numBytes));
+        DEVICE_DELAY_US(100);
+        I2C_setDataCount(I2CA_BASE, 2);
         I2C_setConfig(I2CA_BASE, I2C_CONTROLLER_RECEIVE_MODE);
+        msg->msgStatus = MSG_STATUS_READ_BUSY;
         I2C_sendStartCondition(I2CA_BASE);
         I2C_sendStopCondition(I2CA_BASE);
+    }else{
+        msg->failCount++;
     }
 
     return(SUCCESS);
 }
+
+//configure the ISR to receive data correctly and put it in the data section of my msg
 
 //
 // I2C A ISR (non-FIFO)
@@ -390,7 +407,6 @@ uint16_t readData(struct I2CMsg *msg)
 __interrupt void i2cAISR(void)
 {
     I2C_InterruptSource intSource;
-    uint16_t i;
 
     //
     // Read interrupt source
@@ -407,13 +423,20 @@ __interrupt void i2cAISR(void)
         //
         if(currentMsgPtr->msgStatus == MSG_STATUS_WRITE_BUSY)
         {
-            currentMsgPtr->msgStatus = MSG_STATUS_INACTIVE;
+            if((I2C_getStatus(I2CA_BASE) & I2C_STS_NO_ACK) != 0)
+            {
+                currentMsgPtr->msgStatus = MSG_STATUS_SEND_WITHSTOP;
+                currentMsgPtr->failCount++;
+                I2C_clearStatus(I2CA_BASE, I2C_STS_NO_ACK);
+            }else{
+                currentMsgPtr->msgStatus = MSG_STATUS_INACTIVE;
+            }
         }
         else
         {
             //
             // If a message receives a NACK during the address setup portion of
-            // the EEPROM read, the code further below included in the register
+            // the DIGI POT read, the code further below included in the register
             // access ready interrupt source code will generate a stop
             // condition. After the stop condition is received (here), set the
             // message status to try again. User may want to limit the number
@@ -422,49 +445,27 @@ __interrupt void i2cAISR(void)
             if(currentMsgPtr->msgStatus == MSG_STATUS_SEND_NOSTOP_BUSY)
             {
                 currentMsgPtr->msgStatus = MSG_STATUS_SEND_NOSTOP;
+                currentMsgPtr->failCount++;
             }
             //
-            // If completed message was reading EEPROM data, reset message to
+            // If completed message was reading DIGI POT registers data, reset message to
             // inactive state and read data from FIFO.
             //
             else if(currentMsgPtr->msgStatus == MSG_STATUS_READ_BUSY)
             {
                 currentMsgPtr->msgStatus = MSG_STATUS_INACTIVE;
-                for(i=0; i < NUM_BYTES; i++)
-                {
-                    currentMsgPtr->msgBuffer[i] = I2C_getData(I2CA_BASE);
-                }
 
-                //
-                // Check received data
-                //
-                for(i=0; i < NUM_BYTES; i++)
-                {
-                    if(i2cMsgIn.msgBuffer[i] == i2cMsgOut.msgBuffer[i])
-                    {
-                        passCount++;
-                    }
-                    else
-                    {
-                        failCount++;
-                    }
-                }
+                //read data
+                currentMsgPtr->data_in = (I2C_getData(I2CA_BASE) << 8);
+                currentMsgPtr->data_in += I2C_getData(I2CA_BASE);
 
-                if(passCount == NUM_BYTES)
-                {
-                    pass();
-                }
-                else
-                {
-                    fail();
-                }
             }
         }
     }
     //
     // Interrupt source = Register Access Ready
     //
-    // This interrupt is used to determine when the EEPROM address setup
+    // This interrupt is used to determine when the DIGI POT address setup
     // portion of the read data communication is complete. Since no stop bit
     // is commanded, this flag tells us when the message has been sent
     // instead of the SCD flag.
@@ -493,26 +494,23 @@ __interrupt void i2cAISR(void)
         asm("   ESTOP0");
     }
 
+    if(currentMsgPtr->failCount >= MAX_FAIL_COUNT)
+    {
+        fail(currentMsgPtr->targetAddr);//ignore messages to the device
+    }
+
     //
     // Issue ACK to enable future group 8 interrupts
     //
     Interrupt_clearACKGroup(INTERRUPT_ACK_GROUP8);
 }
 
-//
-// Function to be called if data written matches data read
-//
-void pass(void)
-{
-    asm("   ESTOP0");
-    for(;;);
-}
 
 //
 // Function to be called if data written does NOT match data read
 //
-void fail(void)
+void fail(uint8_t targetAddress)
 {
-    asm("   ESTOP0");
-    for(;;);
+    malFunctioningTargets[j]=targetAddress;
+    j++;
 }
